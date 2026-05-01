@@ -4,7 +4,7 @@ All notable changes to the "amaro-vscode" extension will be documented in this f
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/).
 
-## [1.0.4] - 2026-04-27
+## [1.0.4] - 2026-04-30
 
 ### Added
 - **Hover on variables:** Users can now hover over varaibles in let expressions and lambda expressions to see their types.
@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/).
 - **Parser emits errors:** Previously, when the parser failed, it would quietly skip the line, unbeknownst to the user. Now, the parser provides diagnostic messages to indicate to the user that a line had errors.
 - **Expression inference:** While previously `infer_expr_type` was sufficient for inferring a field, now each field should be inferred using the `register_field` function, as this permits taking into account and applying generic types.
 - **Non-syntax information extracted:** All information about specific blocks, fields, and built-ins have been moved and segregated to their own files, with other files reading from these. This allows the non-syntax information to be modified in a single location.
+- **Index access versus field access:** Some expressions were wrongfully determined to be IndexAccess expressions, such as `x.implementation.(path())`. They are now accurately represented as FieldAccess expressions, since `.(path())` is just the preferred notation for FieldAccess on a struct. Autocomplete suggestions have been modified to reflect this for the relevant items.
 
 ## [1.0.3] - 2026-03-04
 

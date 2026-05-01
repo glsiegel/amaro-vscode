@@ -10,7 +10,8 @@ The LSP performs deep type inference and validation of your quantum routing logi
 * **QubitMap Indexing:** Correctly validates `State.map[Gate.qubits[0]]` - understands that `QubitMap` is indexed by `Qubit`, not `Int`.
 * **Unified Access:** Intelligently handles both property access (`State.map`) and functional access (`State.map()`), allowing for cleaner, more flexible code styles.
 * **Type Inference:** Infers types through nested expressions including `map`, `fold`, `let...in`, `if-then-else`, and `match` expressions.
-* **Smart Leniency:** Expressions of `Unknown` type (e.g. `x.implementation.(path())`) are accepted without false errors.
+* **Generic Type Inference:** Generic types introduced by functions such as `map`, `fold`, `Vec`, ... are evaluated and expressed to the user, taking in relevant context.
+* **Smart Leniency:** Expressions of `Unknown` type are accepted without false errors.
 * **Control Flow Validation:** Ensures type consistency across `if-then-else` branches and supports nested `let...in` bindings.
 * **Vector Operations:** Built-in support for standard vector methods (`push`, `pop`, `extend`) and tuple indexing (`edge.0`).
 * **Deep Type Checking:** Recursively validates generic types (e.g., `Vec<Vec<Location>>`) and custom Struct compatibility.
@@ -42,11 +43,13 @@ A custom Rust-based Language Server (`amaro-lsp`) providing:
     * **Validation:** Validates mandatory blocks (`RouteInfo`, `TransitionInfo`) and required fields (`routed_gates`, `realize_gate`, `get_transitions`, `apply`, `cost`).
     * **Style/Lint Checks:** Warns on incorrectly capitalized block names.
     * **Structure:** Validates correct key-value pairs, fields and struct definitions.
+    * **Generics:** Generic type inference system to aid with hover and autocomplete.
 2.  **Document Outline (Symbols):**
     * Navigate complex blocks, steps, fields and files easily using the VS Code "Outline" view or "Go to Symbol" (`Ctrl+Shift+O`).
     * Symbols are categorized by hierarchy: Blocks (Classes), Steps (Functions), and Fields.
 3.  **Robust Parsing:**
     * Fault-tolerant parsing that continues analyzing the file even after encountering syntax errors (Error recovery).
+    * On many errors, reports the issue to the user before continuing to parse.
     * Full support for embedded Rust blocks `{{ ... }}`.
 
 ## Requirements
@@ -148,7 +151,7 @@ See `examples/Readme.md` for detailed explanations.
 ## Known Issues
 * **`match` in the compiler:** The extension fully supports `match` expressions for navigation and error checking. However, the Amaro compiler does not yet generate code for `match`. Use `if-then-else` in files intended for compilation.
 * **Type Checking:** The `gate_type()` return type is treated as `Gate` for comparison purposes; enum variants are not distinguished.
-* **Hover Support:** Not all fields and types provide accurate hover information.
+* **Built-in Functions:** Not all functions that the compiler makes available to the user are usable, such as `combinations` and `to_2d`. Discovering the signature of these functions and adding them to `builtins.rs` would resolve this issue.
 
 
 See [CHANGELOG.md](CHANGELOG.md) for full history.

@@ -6,7 +6,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::ast::*;
-use crate::info::{blocks, builtins, fields};
+use crate::info::{blocks, builtins, codes, fields};
 use crate::parser::symbols::{Type, UserDefTable};
 use crate::parser::{
     ParseOutput, SemanticResult, StringLabels, check_semantics, parse_file, semantics, utils,
@@ -506,6 +506,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        eprintln!("====== CHANGE =====");
         let uri = params.text_document.uri.clone();
 
         if let Some(change) = params.content_changes.into_iter().next() {
@@ -607,6 +608,7 @@ impl LanguageServer for Backend {
         // this is a lot of repeated work if the user changes hover often
 
         // get the text doc
+
         let uri = params.text_document_position_params.text_document.uri;
 
         let guard = self.parse_cache.read().await;
@@ -714,6 +716,97 @@ impl LanguageServer for Backend {
             })
             .collect();
         Ok(Some(res))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        // put quick fix logic in here
+
+        // get the text doc
+        // TODO should really only get text doc if the code action is needed though.
+        let uri = params.text_document.uri;
+
+        let guard = self.parse_cache.read().await;
+
+        // really just ensure the stuff is there, unused though
+        let (_amaro_file, _type_map, _string_labels) = match guard.get(&uri) {
+            None => return Err(Error::new(ErrorCode::InvalidRequest)),
+            Some(t) => (&t.file, &t.type_map, &t.string_labels),
+        };
+
+        let mut actions = Vec::new();
+        params.context.diagnostics.into_iter().for_each(|elt| {
+            match elt.code {
+                None => {}
+                Some(NumberOrString::Number(codes::MISSING_MANDATORY_BLOCK)) => {
+                    // add mandatory block to the top
+                    // we expect that the data in the diagnostic is the name of the missing block.
+                    let missing_block_name = elt.data.as_ref().unwrap();
+                    let missing_block_name = missing_block_name.as_str().unwrap();
+
+                    let changes = vec![TextEdit {
+                        range: Range::default(), // put at top of doc
+                        new_text: format!("{}:\n\t\n", missing_block_name),
+                    }];
+                    let changes = HashMap::from([(uri.clone(), changes)]);
+
+                    let action = CodeAction {
+                        title: format!("Add missing {} block", missing_block_name),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        diagnostics: Some(vec![elt]),
+                        edit: Some(WorkspaceEdit {
+                            changes: Some(changes),
+                            ..Default::default()
+                        }),
+                        command: None,
+                        is_preferred: Some(true),
+                        disabled: None,
+                        data: None,
+                    };
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+                Some(NumberOrString::Number(codes::MISSING_MANDATORY_FIELD)) => {
+                    // add mandatory field in block after the range, because
+                    // range is the block name
+                    // we expect the data to always be there, given the code
+                    // we expect the data to be object
+                    let missing_field = elt.data.as_ref().unwrap();
+                    let missing_field = missing_field.as_object().unwrap();
+                    let missing_field_name = missing_field.get("field_name").unwrap(); // always there
+                    let missing_field_name = missing_field_name.as_str().unwrap(); // must be string
+                    let missing_field_default_value = missing_field.get("field_value").unwrap(); // expect always there
+
+                    // put on the line right after block
+                    let pos_to_place = Position::new(elt.range.end.line + 1, 0);
+                    let range_to_place = Range::new(pos_to_place, pos_to_place);
+
+                    let changes = vec![TextEdit {
+                        range: range_to_place,
+                        new_text: format!(
+                            "\t{} = {}\n",
+                            missing_field_name, missing_field_default_value
+                        ),
+                    }];
+                    let changes = HashMap::from([(uri.clone(), changes)]);
+
+                    let action = CodeAction {
+                        title: format!("Add missing {} field", missing_field_name),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        diagnostics: Some(vec![elt]),
+                        edit: Some(WorkspaceEdit {
+                            changes: Some(changes),
+                            ..Default::default()
+                        }),
+                        command: None,
+                        is_preferred: Some(true),
+                        disabled: None,
+                        data: None,
+                    };
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+                Some(_) => {}
+            }
+        });
+        Ok(Some(actions))
     }
 }
 

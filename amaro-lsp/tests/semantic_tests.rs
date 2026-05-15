@@ -4,8 +4,8 @@ use amaro_lsp::ast::*;
 use amaro_lsp::parser::expr::parse_expr;
 use amaro_lsp::parser::symbols::{SymbolTable, Type, UserDefTable};
 use amaro_lsp::parser::{
-    GenericTable, InferenceData, StringLabels, TypeMap, check_semantics, overlay_type, parse_file,
-    register_field,
+    GenericTable, InferenceData, ParenMatcher, StringLabels, TypeMap, check_semantics,
+    overlay_type, parse_file, register_field,
 };
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity};
 
@@ -1747,7 +1747,9 @@ fn test_overlay_complex() {
 fn test_if_then_else_information_sharing() {
     let expr = "if x > 5 then Vec().push(5) else Vec()";
     let mut diags = Vec::new();
-    let res_expr = parse_expr(expr, expr, &mut diags).unwrap().1;
+    let res_expr = parse_expr(expr, expr, &mut diags, &mut ParenMatcher::new())
+        .unwrap()
+        .1;
 
     let user_def_table = UserDefTable::empty();
     let mut type_map = TypeMap::new();
@@ -1797,7 +1799,9 @@ fn test_map_generic_resolution_sharing() {
     // generic resolution
     let expr = "(map(|x| -> Transition{ edge = x}, Arch.edges())).push(Transition{edge = (Location(0),Location(0))})";
     let mut diags = Vec::new();
-    let res_expr = parse_expr(expr, expr, &mut diags).unwrap().1;
+    let res_expr = parse_expr(expr, expr, &mut diags, &mut ParenMatcher::new())
+        .unwrap()
+        .1;
 
     let mut field_to_add = HashMap::new();
     field_to_add.insert(

@@ -1,6 +1,7 @@
 use amaro_lsp::ast::*;
 use amaro_lsp::parser::{
-    consume_remaining_block, parse_file, parse_identifier, parse_rust_embedded_robust,
+    check_semantics, consume_remaining_block, parse_file, parse_identifier,
+    parse_rust_embedded_robust,
 };
 
 // Helper to extract first field's value expression from parsed file
@@ -1117,4 +1118,70 @@ fn test_match_expression_with_wildcard() {
             panic!("Expected Match expression");
         }
     }
+}
+
+#[test]
+fn test_no_hang_on_bad_parse() {
+    let input = r#"
+RouteInfo:
+    routed_gates = CX, T
+    GateRealization{path : Vec<Location>}
+    info = map(|x| -> x, Arch.alg_qubits())
+    realize_gate = 
+    if (Gate.gate_type()) == CX 
+        then 
+            map
+                |x| -> GateRealization{path = x}, 
+                all_paths(
+                    arch, 
+                    vertical_neighbors(
+                        State.map[Gate.qubits[0]], 
+                        Arch.width, 
+                        Arch.height
+                    ), 
+                    horizontal_neighbors(
+                        State.map[Gate.qubits[1]],
+                        arch.width
+                    ), 
+            ((values(State.map())).extend(Arch.magic_state_qubits()))
+            .extend(fold(Vec(), |x, acc| -> acc.extend(x), 
+            map(|x| -> x.implementation.(path()), State.implemented_gates())))))
+        else   
+            map(|x| -> GateRealization{path = x}, 
+                all_paths(arch,
+                          vertical_neighbors(State.map[Gate.qubits[0]], Arch.width, Arch.height), 
+                          fold(Vec(), |x, acc| -> acc.extend(x), 
+                          map(|x| -> horizontal_neighbors(x, arch.width), Arch.magic_state_qubits())), 
+                          ((values(State.map()))
+                          .extend(Arch.magic_state_qubits()))
+                          .extend(fold(Vec(), |x, acc| -> acc.extend(x),
+                           map(|x| -> x.implementation.(path()), State.implemented_gates())))))
+ 
+
+TransitionInfo:
+    Transition{na : Location}
+    get_transitions = (Vec()).push(Transition{na=Location(0)})
+    apply = identity_application(step)
+    cost = 0.0
+
+
+ArchInfo:
+    Arch{magic_state_qubits : Vec<Location>, alg_qubits : Vec<Location>, width : Int, height : Int}
+    get_locations = Arch.alg_qubits()
+
+
+StateInfo:
+    cost = 1.0
+
+    "#;
+
+    let file = parse_file(input).expect("Parsing failed").file;
+
+    // let SemanticResult {
+    //     diagnostics: mut semantic_errors,
+    //     type_map,
+    //     user_def_table,
+    //     string_labels,
+    // } =
+    check_semantics(&file);
 }

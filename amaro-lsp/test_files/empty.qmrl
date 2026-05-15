@@ -1,0 +1,11 @@
+RouteInfo:
+	realize_gate = Vec()
+	routed_gates = CX
+	
+TransitionInfo:
+	apply = 1
+	get_transitions = Vec()
+	cost = 1
+	
+
+	

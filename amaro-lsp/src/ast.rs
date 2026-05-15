@@ -30,6 +30,9 @@ pub struct Block {
     pub range: Range,
     pub content: BlockContent,
     pub id: NodeId,
+    /// If set to true, this block will be marked to not record field semantic
+    /// errors by the type checker.
+    pub hide_field_semantic_errors: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -418,12 +421,18 @@ impl Expr {
 }
 
 impl Block {
-    pub fn new(kind: String, range: Range, content: BlockContent) -> Self {
+    pub fn new(
+        kind: String,
+        range: Range,
+        content: BlockContent,
+        hide_field_semantic_errors: bool,
+    ) -> Self {
         Block {
             kind,
             range,
             content,
             id: next_node_id(),
+            hide_field_semantic_errors,
         }
     }
 }

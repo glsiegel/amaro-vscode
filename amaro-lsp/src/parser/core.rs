@@ -9,11 +9,11 @@ use nom::{
 };
 
 use nom::error::Error;
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
 use super::expr::parse_expr;
 use super::utils::calc_range;
-use crate::ast::*;
+use crate::{ast::*, info::codes};
 
 // Whitespaces and Comments
 pub fn whitespace_handler(input: &str) -> IResult<&str, &str> {
@@ -127,6 +127,38 @@ fn parse_generic_type(input: &str) -> IResult<&str, TypeAnnotation> {
     Ok((input, TypeAnnotation::Generic(name.to_string(), type_args)))
 }
 
+/// Tries to parse a left paren, updating the paren_matcher if something
+/// goes wrong.
+pub fn parse_left_paren<'a>(
+    original_input: &'a str,
+    input: &'a str,
+    paren_matcher: &mut ParenMatcher,
+) -> IResult<&'a str, char> {
+    let res = ws(char('('))(input);
+    if res.is_ok() {
+        let start = input.as_ptr() as usize - original_input.as_ptr() as usize;
+        let range = calc_range(original_input, start, 0); // TODO messy!
+        paren_matcher.found_left_paren(range.start);
+    }
+    res
+}
+
+/// Tries to parse a left paren, updating the paren_matcher if something
+/// goes wrong.
+pub fn parse_right_paren<'a>(
+    original_input: &'a str,
+    input: &'a str,
+    paren_matcher: &mut ParenMatcher,
+) -> IResult<&'a str, char> {
+    let res = ws(char(')'))(input);
+    if res.is_ok() {
+        let start = input.as_ptr() as usize - original_input.as_ptr() as usize;
+        let range = calc_range(original_input, start, 0); // TODO messy!
+        paren_matcher.found_right_paren(range.start);
+    }
+    res
+}
+
 fn parse_tuple_type(input: &str) -> IResult<&str, TypeAnnotation> {
     let (input, _) = char('(')(input)?;
     let (input, types) = separated_list1(ws(char(',')), parse_type_annotation)(input)?;
@@ -191,6 +223,7 @@ fn parse_field<'a>(
     original_input: &'a str,
     input: &'a str,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> Result<(&'a str, Field), (&'a str, String)> {
     let input = match whitespace_handler(input) {
         Ok(r) => r.0,
@@ -220,7 +253,7 @@ fn parse_field<'a>(
     };
 
     let val_start = input.as_ptr() as usize - original_input.as_ptr() as usize;
-    let (input, first_expr) = match parse_expr(original_input, input, diags) {
+    let (input, first_expr) = match parse_expr(original_input, input, diags, paren_matcher) {
         Ok(r) => r,
         Err(_) => {
             return Err((
@@ -235,7 +268,7 @@ fn parse_field<'a>(
         let (i, _) = whitespace_handler(i)?;
         let (i, _) = char(',')(i)?;
         let (i, _) = whitespace_handler(i)?;
-        parse_expr(original_input, i, diags)
+        parse_expr(original_input, i, diags, paren_matcher)
     })(input)
     {
         Ok(r) => r,
@@ -310,6 +343,7 @@ fn parse_block_item<'a>(
     original_input: &'a str,
     input: &'a str,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> Result<(&'a str, BlockItem), (&'a str, String)> {
     let input = match whitespace_handler(input) {
         Ok(res) => res.0,
@@ -328,12 +362,14 @@ fn parse_block_item<'a>(
                 "Could not finish parsing this struct def".to_string(),
             )),
         },
-        Some(BlockItemType::Field) => match parse_field(original_input, input, diags) {
-            Ok((input, field)) => Ok((input, BlockItem::Field(field))),
-            Err((rest, reason)) => {
-                Err((rest, format!("Could not parse field. Reason: {}", reason)))
+        Some(BlockItemType::Field) => {
+            match parse_field(original_input, input, diags, paren_matcher) {
+                Ok((input, field)) => Ok((input, BlockItem::Field(field))),
+                Err((rest, reason)) => {
+                    Err((rest, format!("Could not parse field. Reason: {}", reason)))
+                }
             }
-        },
+        }
         None => Err((
             input,
             "This is neither a struct definition nor a field.".to_string(),
@@ -356,6 +392,7 @@ fn extract_block_items(
     original_input: &str,
     body_text: &str,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> Vec<BlockItem> {
     let mut items = Vec::new();
     let mut current_input = body_text;
@@ -392,20 +429,26 @@ fn extract_block_items(
             }
         }
 
-        match parse_block_item(original_input, current_input, diags) {
+        match parse_block_item(original_input, current_input, diags, paren_matcher) {
             Ok((rest, item)) => {
                 items.push(item);
                 current_input = rest;
             }
             Err((rest, reason)) => {
-                if let Some(pos) = rest.find('\n') {
-                    current_input = &rest[pos + 1..];
+                let current_pos = calc_range(
+                    original_input,
+                    rest.as_ptr() as usize - original_input.as_ptr() as usize,
+                    0,
+                )
+                .start; // TODO messy
+                if let Some(new_input) =
+                    paren_matcher.count_all_in_line(rest, current_pos.line, current_pos.character)
+                {
+                    current_input = new_input;
+                    let start_pos = rest.as_ptr() as usize - original_input.as_ptr() as usize;
+                    let end_pos = new_input.as_ptr() as usize - original_input.as_ptr() as usize;
                     diags.push(Diagnostic {
-                        range: calc_range(
-                            original_input,
-                            rest.as_ptr() as usize - original_input.as_ptr() as usize,
-                            pos,
-                        ),
+                        range: calc_range(original_input, start_pos, end_pos - start_pos),
                         severity: Some(DiagnosticSeverity::ERROR),
                         source: Some("Parser".to_string()),
                         message: reason,
@@ -461,6 +504,89 @@ pub fn consume_remaining_block(input: &str) -> IResult<&str, &str> {
     Ok((current, &input[..len]))
 }
 
+pub struct ParenMatcher {
+    left_parens: Vec<Position>,
+    extra_right_parens: Vec<Position>,
+}
+
+impl Default for ParenMatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ParenMatcher {
+    pub fn new() -> Self {
+        Self {
+            left_parens: Vec::new(),
+            extra_right_parens: Vec::new(),
+        }
+    }
+
+    pub fn found_left_paren(&mut self, pos: Position) {
+        self.left_parens.push(pos);
+    }
+
+    pub fn found_right_paren(&mut self, pos: Position) {
+        let pop_res = self.left_parens.pop();
+        if pop_res.is_none() {
+            // meaning, vec was empty
+            self.extra_right_parens.push(pos);
+        }
+    }
+
+    pub fn get_issues(&self) -> Option<Vec<Diagnostic>> {
+        if self.left_parens.is_empty() && self.extra_right_parens.is_empty() {
+            None
+        } else {
+            let mut diags = Vec::new();
+            diags.extend(self.left_parens.iter().map(|elt| Diagnostic {
+                range: Range::new(*elt, *elt),
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("Parser".to_string()),
+                message: "Unclosed left parenthesis".to_string(),
+                code: Some(NumberOrString::Number(codes::OPEN_LEFT_PAREN)),
+                ..Default::default()
+            }));
+            diags.extend(self.extra_right_parens.iter().map(|elt| Diagnostic {
+                range: Range::new(*elt, *elt),
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("Parser".to_string()),
+                message: "Unclosed right parenthesis".to_string(),
+                code: Some(NumberOrString::Number(codes::OPEN_RIGHT_PAREN)),
+                ..Default::default()
+            }));
+
+            Some(diags)
+        }
+    }
+
+    /// Use this to still count parens in skipped lines
+    /// Returns the rest of the input starting at the next line, if it exists.
+    pub fn count_all_in_line<'a>(
+        &mut self,
+        input: &'a str,
+        line: u32,
+        input_start_offset: u32,
+    ) -> Option<&'a str> {
+        input.chars().enumerate().find_map(|(offset, char)| {
+            match char {
+                '\n' => {
+                    return Some(&input[offset + 1..]);
+                }
+                '(' => {
+                    self.found_left_paren(Position::new(line, input_start_offset + offset as u32))
+                }
+                ')' => {
+                    self.found_right_paren(Position::new(line, input_start_offset + offset as u32))
+                }
+                _ => {}
+            }
+            None
+        })
+    }
+}
+
 pub fn parse_block<'a>(
     original_input: &'a str,
     input: &'a str,
@@ -479,10 +605,38 @@ pub fn parse_block<'a>(
     let check_colon: IResult<&str, char, Error<&str>> = peek(char(':'))(input);
     let check_bracket: IResult<&str, char, Error<&str>> = peek(char('['))(input);
 
+    let mut paren_matcher = ParenMatcher::new();
+
     if check_colon.is_ok() {
         let (input, _) = char(':')(input)?;
         let (input, body_content) = consume_remaining_block(input)?;
-        let items = extract_block_items(original_input, body_content, diags);
+
+        let mut extraction_diags = Vec::new();
+        let items = extract_block_items(
+            original_input,
+            body_content,
+            &mut extraction_diags,
+            &mut paren_matcher,
+        );
+
+        // check the paren matcher. if the paren matcher has any issues, then
+        // just use their diags. otherwise, use the extracted diags.
+        let hide_field_semantic_errors: bool = match paren_matcher.get_issues().as_mut() {
+            Some(issues) => {
+                eprintln!(
+                    "{} has paren issues, but {} regular issues",
+                    kind,
+                    extraction_diags.len()
+                );
+                diags.append(issues);
+                true
+            }
+            None => {
+                eprintln!("{} had {} regular issues", kind, extraction_diags.len());
+                diags.append(&mut extraction_diags);
+                false
+            }
+        };
 
         return Ok((
             input,
@@ -490,6 +644,7 @@ pub fn parse_block<'a>(
                 kind.to_string(),
                 calc_range(original_input, start_offset, kind.len()),
                 BlockContent::Fields(items),
+                hide_field_semantic_errors,
             )),
         ));
     }
@@ -517,8 +672,25 @@ pub fn parse_block<'a>(
         }
 
         let inner_body = &original_input[body_start..body_end];
-        let items = extract_block_items(original_input, inner_body, diags);
-
+        let mut extraction_diags = Vec::new();
+        let items = extract_block_items(
+            original_input,
+            inner_body,
+            &mut extraction_diags,
+            &mut paren_matcher,
+        );
+        // check the paren matcher. if the paren matcher has any issues, then
+        // just use their diags. otherwise, use the extracted diags.
+        let hide_field_semantic_errors: bool = match paren_matcher.get_issues().as_mut() {
+            Some(issues) => {
+                diags.append(issues);
+                true
+            }
+            None => {
+                diags.append(&mut extraction_diags);
+                false
+            }
+        };
         let remaining_input = &original_input[body_end..];
         let (input, _) = char(']')(remaining_input)?;
 
@@ -528,6 +700,7 @@ pub fn parse_block<'a>(
                 kind.to_string(),
                 calc_range(original_input, start_offset, kind.len()),
                 BlockContent::Fields(items),
+                hide_field_semantic_errors,
             )),
         ));
     }

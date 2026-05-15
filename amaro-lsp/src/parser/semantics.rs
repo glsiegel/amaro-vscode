@@ -1,8 +1,9 @@
 use super::symbols::*;
 use crate::{
     ast::*,
-    info::{blocks::BlockName, builtins, fields},
+    info::{blocks::BlockName, builtins, codes, fields},
 };
+use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
     ops::Add,
@@ -253,7 +254,9 @@ pub fn check_semantics(file: &AmaroFile) -> SemanticResult {
 
         let mut present_keys: Vec<&str> = Vec::new();
         let BlockContent::Fields(items) = &block.content;
+
         for item in items {
+            // 2.1. Emit errors for "return" keyword used
             if let BlockItem::ReturnKeyword { range, key } = item {
                 // The field was parsed but its value started with `return`, which is
                 // not valid in expression context. Emit a targeted warning and mark
@@ -272,20 +275,25 @@ pub fn check_semantics(file: &AmaroFile) -> SemanticResult {
                 continue;
             }
 
+            // 2.2. Infer field types
             if let BlockItem::Field(field) = item {
                 present_keys.push(field.key.as_str());
 
                 // 3.1. Gate Validation in 'routed_gates' fields
-                // no longer necessary, should check field types below
-                // if block_name == "RouteInfo" && field.key == "routed_gates" {
-                //     validate_gates(&field.value, &mut diagnostics);
-                // }
 
                 let mut generic_table: GenericTable = GenericTable::new();
 
                 let mut inf_data = InferenceData {
                     sym_table: &mut sym_table,
-                    diagnostics: &mut Vec::new(), // do this bc it will be messy in register_field
+                    diagnostics: &mut Vec::new(), // make new diagnostics here for a few reasons.
+                    // 1. register_field does some looping, so diagnostics are emitted multiple times.
+                    // this is because of generic type inference. as such, making a new vec here helps
+                    // ensure we only get the results from the final loop without losing our other
+                    // diagnostics.
+                    // 2. if we have issues with unmatched parentheses in the block, then we dont
+                    // want to emit semantic errors because they will be gibberish. so, we can
+                    // dispose of these diagnostics if there are paren issues. this is a design
+                    // choice that makes it easier to identify issues with parens
                     type_map: &mut type_map,
                     user_def_table: &user_def_table,
                     generic_table: &mut generic_table,
@@ -294,9 +302,14 @@ pub fn check_semantics(file: &AmaroFile) -> SemanticResult {
 
                 let mut field_type = register_field(&field.value, &mut inf_data);
 
-                diagnostics.append(inf_data.diagnostics); // append the vec here
+                if !block.hide_field_semantic_errors {
+                    // only append diags if flag to hide semantic errors is off.
+                    // this flag is set when there are paren mismatch issues, to avoid
+                    // making the diags all messy when the core problem is a paren.
+                    diagnostics.append(inf_data.diagnostics);
+                }
 
-                // 3.2. Enforce types on all fields
+                // 2.3. Enforce type matching on all fields
                 // Additionally, use the field type to help inform the expression type.
 
                 // get the expected type of the field based off the field name
@@ -371,7 +384,7 @@ pub fn check_semantics(file: &AmaroFile) -> SemanticResult {
             }
         }
 
-        // ensure block has all the mandatory fields
+        // 3. Ensure all blocks contain their mandatory fields
         fields::get_all_fields_under(block_name) // get all fields for this block
             .filter(|elt| elt.mandatory_if_block_present) // filter to just mandatory
             .map(|elt| &elt.field_name) // map to just the name of the mandatory
@@ -386,6 +399,13 @@ pub fn check_semantics(file: &AmaroFile) -> SemanticResult {
                         block_name.to_string(),
                         name
                     ),
+                    code: Some(tower_lsp::lsp_types::NumberOrString::Number(
+                        codes::MISSING_MANDATORY_FIELD,
+                    )),
+                    data: Some(json!({
+                        "field_name": name,
+                        "field_value": 1.0f32, // TODO put in reasonable default values here depending on what field requires
+                    })),
                     ..Default::default()
                 });
             });
@@ -394,10 +414,16 @@ pub fn check_semantics(file: &AmaroFile) -> SemanticResult {
     // 4. Mandatory Blocks Check
     for req_block in BlockName::get_mandatory_blocks() {
         if !found_blocks.contains_key(&req_block) {
+            let req_block_name = req_block.to_string();
+
             diagnostics.push(Diagnostic {
                 range: Range::default(),
                 severity: Some(DiagnosticSeverity::ERROR),
-                message: format!("Missing mandatory block: '{}'.", req_block.to_string()),
+                message: format!("Missing mandatory block: '{}'.", req_block_name),
+                code: Some(tower_lsp::lsp_types::NumberOrString::Number(
+                    codes::MISSING_MANDATORY_BLOCK,
+                )),
+                data: Some(serde_json::Value::String(req_block_name.to_string())),
                 ..Default::default()
             });
         }
@@ -1324,21 +1350,17 @@ pub fn infer_expr_type(expr: &Expr, inference_data: &mut InferenceData) -> Type 
                     inference_data.diagnostics.push(Diagnostic {
                             range: expr.range,
                             severity: Some(DiagnosticSeverity::ERROR),
-                            message: format!("Then and else branches of if-then-else must have compatible types. Then: {}, Else: {}. There were this incompatibilities: {:?}", then_type, else_type, incompatibilities),
+                            message: format!("Then and else branches of if-then-else must have compatible types. Then: {}, Else: {}. There were these incompatibilities: {:?}", then_type, else_type, incompatibilities),
                             ..Default::default()
                         });
                 }
             }
 
-            if overlayed_dir_1 {
-                retype(then_branch, then_type.clone(), inference_data);
-            }
-            if overlayed_dir_2 {
-                retype(else_branch, else_type.clone(), inference_data);
-            }
-
             if overlayed_dir_1 || overlayed_dir_2 {
                 // we need to rerun inference, because things have changed on this expr
+                retype(then_branch, then_type.clone(), inference_data);
+                retype(else_branch, else_type.clone(), inference_data);
+
                 return infer_expr_type(expr, inference_data);
             } else {
                 if !types_compatible(&then_type, &else_type) {
@@ -2067,7 +2089,8 @@ pub fn suggest_next_from_type(
 /// recursively (as best it can) retype all the subexpressions to match this
 /// format.
 ///
-/// Doesn't retype identifiers. Additionally, doesn't "identify" the generics.
+/// Doesn't retype identifiers (though it could...). Additionally, doesn't
+/// "identify" the generics.
 /// Use this once we have identified the mappings of the generics first, otherwise
 /// we risk losing information by losing association between generics and their types.
 pub fn retype(expr: &Expr, new_type: Type, inference_data: &mut InferenceData) {

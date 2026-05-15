@@ -5,15 +5,25 @@ RouteInfo:
     realize_gate = 
     if (Gate.gate_type()) == CX 
         then 
-            map(|x| -> GateRealization{path = x}, 
-            all_paths(arch, vertical_neighbors(State.map[Gate.qubits[0]], Arch.width, Arch.height), 
-            horizontal_neighbors(State.map[Gate.qubits[1]], arch.width), 
+            map(
+                |x| -> GateRealization{path = x}, 
+                all_paths(
+                    arch, 
+                    vertical_neighbors(
+                        State.map[Gate.qubits[0]], 
+                        Arch.width, 
+                        Arch.height
+                    ), 
+                    horizontal_neighbors(
+                        State.map[Gate.qubits[1]],
+                        arch.width
+                    ), 
             ((values(State.map())).extend(Arch.magic_state_qubits()))
             .extend(fold(Vec(), |x, acc| -> acc.extend(x), 
             map(|x| -> x.implementation.(path()), State.implemented_gates())))))
         else   
             map(|x| -> GateRealization{path = x}, 
-                all_paths(arch, 
+                all_paths(arch,
                           vertical_neighbors(State.map[Gate.qubits[0]], Arch.width, Arch.height), 
                           fold(Vec(), |x, acc| -> acc.extend(x), 
                           map(|x| -> horizontal_neighbors(x, arch.width), Arch.magic_state_qubits())), 

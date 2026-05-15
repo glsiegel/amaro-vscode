@@ -6,12 +6,13 @@ use nom::{
     character::complete::{char, digit1},
     combinator::{map, opt, peek, recognize, value, verify},
     multi::{many0, separated_list0},
-    sequence::{pair, terminated, tuple},
+    sequence::{pair, tuple},
 };
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 
 use super::utils::calc_range;
 use crate::ast::*;
+use crate::parser::{ParenMatcher, parse_left_paren, parse_right_paren};
 
 use super::core::{
     is_keyword, parse_identifier, parse_non_keyword_identifier, whitespace_handler, ws,
@@ -80,11 +81,12 @@ pub fn parse_expr<'a>(
     original_input: &'a str,
     input: &'a str,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     let (input, _) = whitespace_handler(input)?;
 
     let mut ctx = ParseContext::new();
-    parse_expr_with_context(original_input, input, &mut ctx, diags)
+    parse_expr_with_context(original_input, input, &mut ctx, diags, paren_matcher)
 }
 
 fn parse_expr_with_context<'a>(
@@ -92,10 +94,11 @@ fn parse_expr_with_context<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     ctx.enter()
         .map_err(|_| nom::Err::Error(Error::new(input, nom::error::ErrorKind::TooLarge)))?;
-    let result = parse_let_expr(original_input, input, ctx, diags);
+    let result = parse_let_expr(original_input, input, ctx, diags, paren_matcher);
     ctx.exit();
     result
 }
@@ -105,6 +108,7 @@ fn parse_let_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     let start = input.as_ptr() as usize - original_input.as_ptr() as usize;
 
@@ -163,7 +167,7 @@ fn parse_let_expr<'a>(
         };
         let (input, _) = whitespace_handler(input)?;
 
-        let (input, value) = parse_if_expr(original_input, input, ctx, diags)?;
+        let (input, value) = parse_if_expr(original_input, input, ctx, diags, paren_matcher)?;
 
         // 4. Handle 'in' with whitespace around it
         let (input, _) = whitespace_handler(input)?;
@@ -193,7 +197,8 @@ fn parse_let_expr<'a>(
         };
         let (input, _) = whitespace_handler(input)?;
 
-        let (input, body) = parse_expr_with_context(original_input, input, ctx, diags)?;
+        let (input, body) =
+            parse_expr_with_context(original_input, input, ctx, diags, paren_matcher)?;
 
         let end = input.as_ptr() as usize - original_input.as_ptr() as usize;
 
@@ -215,9 +220,9 @@ fn parse_let_expr<'a>(
         // Check for `match` expression before delegating to if/lambda/binary
         let (_, is_match) = opt(peek(ws(parse_keyword("match"))))(input)?;
         if is_match.is_some() {
-            parse_match_expr(original_input, input, ctx, diags)
+            parse_match_expr(original_input, input, ctx, diags, paren_matcher)
         } else {
-            parse_if_expr(original_input, input, ctx, diags)
+            parse_if_expr(original_input, input, ctx, diags, paren_matcher)
         }
     }
 }
@@ -227,6 +232,7 @@ fn parse_if_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     let start = input.as_ptr() as usize - original_input.as_ptr() as usize;
 
@@ -237,7 +243,8 @@ fn parse_if_expr<'a>(
     if is_if.is_some() {
         // 2. Whitespace after 'if'
         let (input, _) = whitespace_handler(input)?;
-        let (input, condition) = parse_lambda_expr(original_input, input, ctx, diags)?;
+        let (input, condition) =
+            parse_lambda_expr(original_input, input, ctx, diags, paren_matcher)?;
 
         // 3. Handle 'then' with whitespace around it
         let (input, _) = whitespace_handler(input)?;
@@ -265,7 +272,7 @@ fn parse_if_expr<'a>(
         };
         let (input, _) = whitespace_handler(input)?;
 
-        let (input, then_branch) = parse_if_expr(original_input, input, ctx, diags)?;
+        let (input, then_branch) = parse_if_expr(original_input, input, ctx, diags, paren_matcher)?;
 
         // 4. Handle 'else' with whitespace around it
         let (input, _) = whitespace_handler(input)?;
@@ -292,7 +299,7 @@ fn parse_if_expr<'a>(
         };
         let (input, _) = whitespace_handler(input)?;
 
-        let (input, else_branch) = parse_if_expr(original_input, input, ctx, diags)?;
+        let (input, else_branch) = parse_if_expr(original_input, input, ctx, diags, paren_matcher)?;
 
         let end = input.as_ptr() as usize - original_input.as_ptr() as usize;
 
@@ -308,7 +315,7 @@ fn parse_if_expr<'a>(
             ),
         ))
     } else {
-        parse_lambda_expr(original_input, input, ctx, diags)
+        parse_lambda_expr(original_input, input, ctx, diags, paren_matcher)
     }
 }
 
@@ -317,6 +324,7 @@ fn parse_lambda_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     let start = input.as_ptr() as usize - original_input.as_ptr() as usize;
 
@@ -409,7 +417,8 @@ fn parse_lambda_expr<'a>(
         };
         let (input, _) = whitespace_handler(input)?;
 
-        let (input, body) = parse_expr_with_context(original_input, input, ctx, diags)?;
+        let (input, body) =
+            parse_expr_with_context(original_input, input, ctx, diags, paren_matcher)?;
 
         let end = input.as_ptr() as usize - original_input.as_ptr() as usize;
 
@@ -430,7 +439,7 @@ fn parse_lambda_expr<'a>(
             ),
         ))
     } else {
-        parse_logical_or_expr(original_input, input, ctx, diags)
+        parse_logical_or_expr(original_input, input, ctx, diags, paren_matcher)
     }
 }
 
@@ -439,12 +448,13 @@ fn parse_logical_or_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     parse_binary_op(
         original_input,
         input,
         ctx,
-        |o, i, c| parse_logical_and_expr(o, i, c, diags),
+        |o, i, c| parse_logical_and_expr(o, i, c, diags, paren_matcher),
         alt((value(BinaryOperator::Or, ws(tag("||"))),)),
     )
 }
@@ -454,12 +464,13 @@ fn parse_logical_and_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     parse_binary_op(
         original_input,
         input,
         ctx,
-        |o, i, c| parse_comparison_expr(o, i, c, diags),
+        |o, i, c| parse_comparison_expr(o, i, c, diags, paren_matcher),
         alt((value(BinaryOperator::And, ws(tag("&&"))),)),
     )
 }
@@ -469,12 +480,13 @@ fn parse_comparison_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     parse_binary_op(
         original_input,
         input,
         ctx,
-        |o, i, c| parse_tensor_expr(o, i, c, diags),
+        |o, i, c| parse_tensor_expr(o, i, c, diags, paren_matcher),
         alt((
             value(BinaryOperator::Eq, ws(tag("=="))),
             value(BinaryOperator::Ne, ws(tag("!="))),
@@ -491,12 +503,13 @@ fn parse_tensor_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     parse_binary_op(
         original_input,
         input,
         ctx,
-        |o, i, c| parse_range_expr(o, i, c, diags),
+        |o, i, c| parse_range_expr(o, i, c, diags, paren_matcher),
         alt((value(
             BinaryOperator::Tensor,
             ws(alt((tag("⊗"), tag("tensor")))),
@@ -509,12 +522,13 @@ fn parse_range_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     parse_binary_op(
         original_input,
         input,
         ctx,
-        |o, i, c| parse_additive_expr(o, i, c, diags),
+        |o, i, c| parse_additive_expr(o, i, c, diags, paren_matcher),
         alt((value(BinaryOperator::Range, ws(tag(".."))),)),
     )
 }
@@ -524,12 +538,13 @@ fn parse_additive_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     parse_binary_op(
         original_input,
         input,
         ctx,
-        |o, i, c| parse_multiplicative_expr(o, i, c, diags),
+        |o, i, c| parse_multiplicative_expr(o, i, c, diags, paren_matcher),
         alt((
             value(BinaryOperator::Add, ws(char('+'))),
             value(BinaryOperator::Sub, ws(char('-'))),
@@ -542,12 +557,13 @@ fn parse_multiplicative_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     parse_binary_op(
         original_input,
         input,
         ctx,
-        |o, i, c| parse_unary_expr(o, i, c, diags),
+        |o, i, c| parse_unary_expr(o, i, c, diags, paren_matcher),
         alt((
             value(BinaryOperator::Mul, ws(char('*'))),
             value(BinaryOperator::Div, ws(char('/'))),
@@ -600,6 +616,7 @@ fn parse_unary_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     let start = input.as_ptr() as usize - original_input.as_ptr() as usize;
 
@@ -610,7 +627,8 @@ fn parse_unary_expr<'a>(
 
     match op_parse {
         Ok((rest, op)) => {
-            let (rest, operand) = parse_unary_expr(original_input, rest, ctx, diags)?;
+            let (rest, operand) =
+                parse_unary_expr(original_input, rest, ctx, diags, paren_matcher)?;
             let end = rest.as_ptr() as usize - original_input.as_ptr() as usize;
             Ok((
                 rest,
@@ -623,7 +641,7 @@ fn parse_unary_expr<'a>(
                 ),
             ))
         }
-        Err(_) => parse_postfix_expr(original_input, input, ctx, diags),
+        Err(_) => parse_postfix_expr(original_input, input, ctx, diags, paren_matcher),
     }
 }
 
@@ -632,16 +650,39 @@ fn parse_postfix_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
-    let (mut current_input, mut base) = parse_primary_expr(original_input, input, ctx, diags)?;
+    let (mut current_input, mut base) =
+        parse_primary_expr(original_input, input, ctx, diags, paren_matcher)?;
     let start = input.as_ptr() as usize - original_input.as_ptr() as usize;
 
     loop {
         if let Ok((rest, _)) = ws(char('.'))(current_input) {
             // Tuple Projection / Dynamic Indexing with Parentheses
-            if let Ok((rest_inner, _)) = tag::<_, _, Error<&str>>("(")(rest) {
+            if let Ok((rest_inner, _)) = parse_left_paren(original_input, rest, paren_matcher) {
                 // Tuple Projection .(0)
-                if let Ok((rest_idx, idx_str)) = terminated(digit1, ws(char(')')))(rest_inner) {
+                // used to be something like terminated(digit, ')')
+                if let Ok((rest_idx, idx_str)) = digit1::<&str, nom::error::Error<_>>(rest_inner) {
+                    let rest_idx = match parse_right_paren(original_input, rest_idx, paren_matcher)
+                    {
+                        Ok(r) => r.0,
+                        Err(e) => match e {
+                            nom::Err::Error(new_input) => {
+                                let end = new_input.input.as_ptr() as usize
+                                    - original_input.as_ptr() as usize;
+                                diags.push(Diagnostic {
+                                    range: calc_range(original_input, start, end - start),
+                                    severity: Some(DiagnosticSeverity::ERROR),
+                                    source: Some("Parser".to_string()),
+                                    message: "Tuple projection with .(#) syntax needs an closing ) inside".to_string(),
+                                    ..Default::default()
+                                });
+                                new_input.input
+                            }
+                            _ => return Err(e),
+                        },
+                    };
+
                     let idx = idx_str.parse::<usize>().unwrap_or(0);
                     let end = rest_idx.as_ptr() as usize - original_input.as_ptr() as usize;
 
@@ -656,31 +697,10 @@ fn parse_postfix_expr<'a>(
                     continue;
                 }
 
-                // Dynamic Indexing .(expr)
-                // TODO i don't think there is dynamic indexing, it is just
-                // a different notation for field access
-                // if let Ok((rest_final, index_expr)) = terminated(
-                //     |i| parse_expr_with_context(original_input, i, ctx, diags),
-                //     ws(char(')')),
-                // )(rest_inner)
-                // {
-                //     let end = rest_final.as_ptr() as usize - original_input.as_ptr() as usize;
-
-                //     base = Expr::new(
-                //         ExprKind::IndexAccess {
-                //             object: Box::new(base),
-                //             index: Box::new(index_expr),
-                //         },
-                //         calc_range(original_input, start, end - start),
-                //     );
-                //     current_input = rest_final;
-                //     continue;
-                // }
-
                 // Other notation for field access
                 if let Ok((rest, ident)) = parse_identifier(rest_inner) {
                     // expect ()
-                    let rest = match ws(char('('))(rest) {
+                    let rest = match parse_left_paren(original_input, rest, paren_matcher) {
                         Ok(r) => r.0,
                         Err(e) => match e {
                             nom::Err::Error(new_input) => {
@@ -698,7 +718,7 @@ fn parse_postfix_expr<'a>(
                             _ => return Err(e),
                         },
                     };
-                    let rest = match ws(char(')'))(rest) {
+                    let rest = match parse_right_paren(original_input, rest, paren_matcher) {
                         Ok(r) => r.0,
                         Err(e) => match e {
                             nom::Err::Error(new_input) => {
@@ -716,7 +736,7 @@ fn parse_postfix_expr<'a>(
                             _ => return Err(e),
                         },
                     };
-                    let rest = match ws(char(')'))(rest) {
+                    let rest = match parse_right_paren(original_input, rest, paren_matcher) {
                         Ok(r) => r.0,
                         Err(e) => match e {
                             nom::Err::Error(new_input) => {
@@ -783,7 +803,8 @@ fn parse_postfix_expr<'a>(
 
         // Indexing
         if let Ok((rest, _)) = ws(char('['))(current_input) {
-            let (rest, index_expr) = parse_expr_with_context(original_input, rest, ctx, diags)?;
+            let (rest, index_expr) =
+                parse_expr_with_context(original_input, rest, ctx, diags, paren_matcher)?;
             let rest = match ws(char(']'))(rest) {
                 Ok(r) => r.0,
                 Err(e) => match e {
@@ -816,12 +837,13 @@ fn parse_postfix_expr<'a>(
         }
 
         // Function call
-        if let Ok((rest, _)) = ws(char('('))(current_input) {
+        if let Ok((rest, _)) = parse_left_paren(original_input, current_input, paren_matcher) {
             let res = separated_list0(ws(char(',')), |i| {
                 //parse_expr_with_context(original_input, i, ctx)
                 let (i, _) = whitespace_handler(i)?;
                 let arg_start = i.as_ptr() as usize - original_input.as_ptr() as usize;
-                let (i, mut expr) = parse_expr_with_context(original_input, i, ctx, diags)?;
+                let (i, mut expr) =
+                    parse_expr_with_context(original_input, i, ctx, diags, paren_matcher)?;
                 let arg_end = i.as_ptr() as usize - original_input.as_ptr() as usize;
                 expr.range = calc_range(original_input, arg_start, arg_end - arg_start);
                 Ok((i, expr))
@@ -844,7 +866,7 @@ fn parse_postfix_expr<'a>(
                     _ => return Err(e),
                 },
             };
-            let rest = match ws(char(')'))(rest) {
+            let rest = match parse_right_paren(original_input, rest, paren_matcher) {
                 Ok(r) => r.0,
                 Err(e) => match e {
                     nom::Err::Error(new_input) => {
@@ -886,6 +908,7 @@ fn parse_primary_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     let start: usize = input.as_ptr() as usize - original_input.as_ptr() as usize;
 
@@ -912,9 +935,10 @@ fn parse_primary_expr<'a>(
     }
 
     if let Ok((rest, _)) = ws(tag("Some"))(input) {
-        let (rest, _) = ws(char('('))(rest)?;
-        let (rest, expr) = parse_expr_with_context(original_input, rest, ctx, diags)?;
-        let (rest, _) = ws(char(')'))(rest)?;
+        let (rest, _) = parse_left_paren(original_input, rest, paren_matcher)?;
+        let (rest, expr) =
+            parse_expr_with_context(original_input, rest, ctx, diags, paren_matcher)?;
+        let (rest, _) = parse_right_paren(original_input, rest, paren_matcher)?;
 
         let end = rest.as_ptr() as usize - original_input.as_ptr() as usize;
         return Ok((
@@ -929,7 +953,7 @@ fn parse_primary_expr<'a>(
     // List literal
     if let Ok((rest, _)) = ws(char('['))(input) {
         let res = separated_list0(ws(char(',')), |i| {
-            parse_expr_with_context(original_input, i, ctx, diags)
+            parse_expr_with_context(original_input, i, ctx, diags, paren_matcher)
         })(rest);
 
         let (rest, exprs) = match res {
@@ -978,11 +1002,11 @@ fn parse_primary_expr<'a>(
     }
 
     // Tuple literal / Parenthesized expression
-    if let Ok((rest, _)) = ws(char('('))(input) {
+    if let Ok((rest, _)) = parse_left_paren(original_input, input, paren_matcher) {
         let (rest, exprs) = separated_list0(ws(char(',')), |i| {
-            parse_expr_with_context(original_input, i, ctx, diags)
+            parse_expr_with_context(original_input, i, ctx, diags, paren_matcher)
         })(rest)?;
-        let (rest, _) = ws(char(')'))(rest)?;
+        let (rest, _) = parse_right_paren(original_input, rest, paren_matcher)?;
 
         let end = rest.as_ptr() as usize - original_input.as_ptr() as usize;
         if exprs.len() == 1 {
@@ -1019,7 +1043,7 @@ fn parse_primary_expr<'a>(
                     ws(char(',')),
                     map(
                         tuple((parse_identifier, ws(char('=')), |i| {
-                            parse_expr_with_context(original_input, i, ctx, diags)
+                            parse_expr_with_context(original_input, i, ctx, diags, paren_matcher)
                         })),
                         |(name, _, expr)| (name.to_string(), expr),
                     ),
@@ -1068,6 +1092,7 @@ fn parse_match_expr<'a>(
     input: &'a str,
     ctx: &mut ParseContext,
     diags: &mut Vec<Diagnostic>,
+    paren_matcher: &mut ParenMatcher,
 ) -> IResult<&'a str, Expr> {
     let start = input.as_ptr() as usize - original_input.as_ptr() as usize;
 
@@ -1075,7 +1100,8 @@ fn parse_match_expr<'a>(
     let (input, _) = ws(parse_keyword("match"))(input)?;
 
     // Parse scrutinee — any expression up to `with`
-    let (input, scrutinee) = parse_expr_with_context(original_input, input, ctx, diags)?;
+    let (input, scrutinee) =
+        parse_expr_with_context(original_input, input, ctx, diags, paren_matcher)?;
 
     // Consume `with`
     let input = match ws(tag("with"))(input) {
@@ -1120,7 +1146,8 @@ fn parse_match_expr<'a>(
                 _ => return Err(e),
             },
         };
-        let (rest, body) = parse_expr_with_context(original_input, rest, ctx, diags)?;
+        let (rest, body) =
+            parse_expr_with_context(original_input, rest, ctx, diags, paren_matcher)?;
         arms.push(MatchArm { pattern, body });
         current = rest;
     }
@@ -1228,7 +1255,7 @@ fn parse_string_literal<'a>(
 #[test]
 fn test_temp() {
     let my_str = "map(|x| -> x.implementation.(path(), jacob)".to_string();
-    match parse_expr(&my_str, &my_str, &mut Vec::new()) {
+    match parse_expr(&my_str, &my_str, &mut Vec::new(), &mut ParenMatcher::new()) {
         Ok(r) => {
             println!("We parsed it as:");
             println!("{}", r.1.kind);

@@ -1,0 +1,4 @@
+pub const MISSING_MANDATORY_BLOCK: i32 = 0;
+pub const MISSING_MANDATORY_FIELD: i32 = 1;
+pub const OPEN_LEFT_PAREN: i32 = 2;
+pub const OPEN_RIGHT_PAREN: i32 = 3;
